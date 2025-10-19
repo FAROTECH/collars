@@ -1,0 +1,145 @@
+================================================================================
+CICERONE – DATA ACQUISITION AND TELEMETRY LOGIC
+================================================================================
+Version: October 2025
+Author: CShark – Firmware Architecture Team
+================================================================================
+
+1. OVERVIEW
+-----------
+The Cicerone firmware manages the collection, processing, aggregation, and
+transmission of data from integrated sensors, with the goal of periodically
+providing compact JSON packets compatible with the ChirpStack portal.
+
+The system is structured into multiple logical levels (a 5-layer pipeline)
+that clearly separate:
+  - physical data sampling
+  - local processing
+  - telemetry record creation
+  - LoRa transmission
+  - SD card storage
+
+
+================================================================================
+2. DATA PROCESSING PIPELINE
+================================================================================
+
+───────────────────────────────────────────────────────────────────────────────
+LEVEL 1 – RAW DATA LAYER
+───────────────────────────────────────────────────────────────────────────────
+Each sensor is read at its own sampling frequency.
+Raw data are locally buffered for subsequent processing.
+
+| Sensor          | Frequency         | Buffer                | Notes                               |
+|------------------|-------------------|-----------------------|------------------------------------|
+| LIS3DH           | every 30 seconds  | 300 samples/axis      | motion analysis                    |
+| MAX9814          | every 30 seconds  | 32,000 samples        | rumination analysis (audio ML)     |
+| BME280           | every 30 minutes  | none                  | environmental sensor               |
+| MLX90614         | every 1 minute    | none                  | body and ambient temperature       |
+| AD8232           | every 1 second    | 2,500 samples (250Hz) | BPM calculation                    |
+| Battery monitor  | every 1 minute    | none                  | battery voltage reading            |
+| GPS (Move-X)     | 1 Hz              | none                  | position and UTC time              |
+
+At this level only raw physical data are collected, filtered if necessary.
+
+
+───────────────────────────────────────────────────────────────────────────────
+LEVEL 2 – FEATURE & STATE EXTRACTION LAYER
+───────────────────────────────────────────────────────────────────────────────
+Raw data are processed to extract significant parameters or behavioral states
+through local logic and Machine Learning models.
+
+- AD8232 → BPM calculation every 5 minutes, average over 10 s windows (250 Hz)
+- MAX9814 → RMS and audio features calculated for rumination algorithm
+  ML Output:  ruminate = 1 / 0
+- LIS3DH → variance, magnitude, direction calculated for motion algorithm
+  ML Output:  grazing / standing / walking / sitting = 1 / 0
+- MLX90614 + BME280 → comparison between body and ambient temperature
+- Battery monitor → voltage and charge percentage
+- GPS → latitude, longitude and UTC time
+
+
+───────────────────────────────────────────────────────────────────────────────
+LEVEL 3 – AGGREGATION LAYER
+───────────────────────────────────────────────────────────────────────────────
+Processed results are collected into coherent telemetry records, each
+representing a “snapshot” of the system at a given instant.
+
+Example record:
+
+{
+  "id": "C#001",
+  "timestamp": "2025-10-18T16:00:00Z",
+  "position": { "lat": 44.985, "lon": 9.716 },
+  "temp": { "body": 38.5, "ambient": 22.1 },
+  "heart": [0.02, 0.06, 0.12, 0.85, 1.1, 0.3, -0.05, -0.15, 0.1, 0.02],
+  "ruminate": 1,
+  "grazing": 0,
+  "standing": 1,
+  "walking": 0,
+  "sitting": 0,
+  "batt": 3.85
+}
+
+This JSON structure represents the “final” data format ready
+for transmission and storage.
+
+
+───────────────────────────────────────────────────────────────────────────────
+LEVEL 4 – TRANSMISSION LAYER
+───────────────────────────────────────────────────────────────────────────────
+Telemetry records are placed in a dedicated FIFO transmission queue.
+Every 20–30 minutes, the system sends all queued records as single packets
+via LoRa (one per payload).
+
+Main characteristics:
+- each payload contains a single JSON record
+- unsent records remain in queue or on SD
+- payloads have constant and predictable size
+- direct compatibility with ChirpStack
+
+This approach reduces complexity, avoids large arrays,
+and simplifies server-side reconstruction.
+
+
+───────────────────────────────────────────────────────────────────────────────
+LEVEL 5 – STORAGE & RECOVERY LAYER
+───────────────────────────────────────────────────────────────────────────────
+All records (sent or unsent) are saved on the SD card in JSON line or binary
+format, allowing:
+- automatic recovery after reset
+- replay of unsent records
+- local validation of acquired data
+
+
+================================================================================
+3. GLOBAL CONCEPT
+================================================================================
+The Cicerone system operates according to a hierarchical pipeline:
+
+  ┌──────────────────────┐
+  │  L1. Sampling        │ → acquisition of raw data from sensors
+  ├──────────────────────┤
+  │  L2. Processing      │ → feature extraction, BPM, RMS, ML states
+  ├──────────────────────┤
+  │  L3. Aggregation     │ → construction of time-stamped JSON record
+  ├──────────────────────┤
+  │  L4. Transmission    │ → sending record via LoRa (one per payload)
+  ├──────────────────────┤
+  │  L5. Storage         │ → persistent saving on SD
+  └──────────────────────┘
+
+
+================================================================================
+4. FUTURE INTEGRATIONS
+================================================================================
+- Integration of ML model for rumination recognition (MAX9814)
+- Integration of ML model for behavior recognition (LIS3DH)
+- Lightweight JSON or CBOR compression for LoRa payload
+- Bidirectional synchronization with ACK via ChirpStack
+- Automatic calibration of physiological and environmental thresholds
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

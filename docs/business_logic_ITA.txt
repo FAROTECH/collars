@@ -1,0 +1,146 @@
+================================================================================
+CICERONE – DATA ACQUISITION AND TELEMETRY LOGIC
+================================================================================
+Versione: Ottobre 2025
+Autore: CShark – Firmware Architecture Team
+================================================================================
+
+1. OVERVIEW
+-----------
+Il firmware del Cicerone gestisce la raccolta, elaborazione, aggregazione e 
+trasmissione dei dati provenienti dai sensori integrati, con l’obiettivo di 
+fornire periodicamente pacchetti JSON compatti e compatibili con il portale 
+ChirpStack.
+
+Il sistema è strutturato su più livelli logici (pipeline a 5 layer) che 
+separano chiaramente:
+  - il campionamento dei dati fisici
+  - l’elaborazione locale
+  - la creazione di record telemetrici
+  - la trasmissione via LoRa
+  - la storicizzazione su SD card
+
+
+================================================================================
+2. DATA PROCESSING PIPELINE
+================================================================================
+
+───────────────────────────────────────────────────────────────────────────────
+LIVELLO 1 – CAMPIONAMENTO GREZZO (RAW DATA LAYER)
+───────────────────────────────────────────────────────────────────────────────
+Ogni sensore viene letto alla propria frequenza di campionamento. 
+I dati grezzi vengono bufferizzati localmente per successive elaborazioni.
+
+| Sensore          | Frequenza         | Buffer                | Note                               |
+|------------------|-------------------|-----------------------|------------------------------------|
+| LIS3DH           | ogni 30 secondi   | 300 campioni/asse     | analisi movimento                  |
+| MAX9814          | ogni 30 secondi   | 32.000 campioni       | analisi rumine (ML audio)          |
+| BME280           | ogni 30 minuti    | nessuno               | sensore ambientale                 |
+| MLX90614         | ogni 1 minuto     | nessuno               | temp. corporea e ambiente          |
+| AD8232           | ogni 1 secondo    | 2.500 campioni (250Hz)| calcolo BPM                        |
+| Battery monitor  | ogni 1 minuto     | nessuno               | lettura tensione batteria          |
+| GPS (Move-X)     | 1 Hz              | nessuno               | posizione e tempo UTC              |
+
+In questo livello si raccolgono solo dati fisici grezzi, filtrati se necessario.
+
+
+───────────────────────────────────────────────────────────────────────────────
+LIVELLO 2 – ELABORAZIONE LOCALE (FEATURE & STATE EXTRACTION LAYER)
+───────────────────────────────────────────────────────────────────────────────
+I dati grezzi vengono elaborati per estrarre parametri significativi o stati 
+comportamentali attraverso logiche locali e modelli di Machine Learning.
+
+- AD8232 → calcolo BPM ogni 5 minuti, media su finestre da 10 s (250 Hz)
+- MAX9814 → calcolo RMS e feature audio per algoritmo di ruminazione
+  Output ML:  ruminate = 1 / 0
+- LIS3DH → calcolo varianza, magnitudine, direzione per algoritmo di movimento
+  Output ML:  grazing / standing / walking / sitting = 1 / 0
+- MLX90614 + BME280 → confronto temp. corporea / ambiente
+- Battery monitor → tensione e % di carica
+- GPS → latitudine, longitudine e tempo UTC
+
+
+───────────────────────────────────────────────────────────────────────────────
+LIVELLO 3 – AGGREGAZIONE TEMPORALE (AGGREGATION LAYER)
+───────────────────────────────────────────────────────────────────────────────
+I risultati elaborati vengono raccolti in record telemetrici coerenti, ciascuno 
+rappresentante uno “snapshot” del sistema in un dato istante.
+
+Esempio di record:
+
+{
+  "id": "C#001",
+  "timestamp": "2025-10-18T16:00:00Z",
+  "position": { "lat": 44.985, "lon": 9.716 },
+  "temp": { "body": 38.5, "ambient": 22.1 },
+  "heart": [0.02, 0.06, 0.12, 0.85, 1.1, 0.3, -0.05, -0.15, 0.1, 0.02],
+  "ruminate": 1,
+  "grazing": 0,
+  "standing": 1,
+  "walking": 0,
+  "sitting": 0,
+  "batt": 3.85
+}
+
+Questa struttura JSON rappresenta il formato “finale” del dato pronto 
+per invio e archiviazione.
+
+
+───────────────────────────────────────────────────────────────────────────────
+LIVELLO 4 – TRASMISSIONE (TRANSMISSION LAYER)
+───────────────────────────────────────────────────────────────────────────────
+I record telemetrici vengono inseriti in una coda FIFO dedicata alla trasmissione.
+Ogni 20–30 minuti, il sistema invia tutti i record in coda come pacchetti singoli 
+via LoRa (uno per payload).
+
+Caratteristiche principali:
+- ogni payload contiene un singolo record JSON
+- i record non inviati restano in coda o su SD
+- payload di dimensioni costanti e prevedibili
+- compatibilità diretta con ChirpStack
+
+Questo approccio riduce la complessità, evita array di grandi dimensioni e 
+semplifica la ricostruzione lato server.
+
+
+───────────────────────────────────────────────────────────────────────────────
+LIVELLO 5 – STORICIZZAZIONE E RESILIENZA (STORAGE & RECOVERY LAYER)
+───────────────────────────────────────────────────────────────────────────────
+Tutti i record (inviati o non inviati) vengono salvati su SD card in formato 
+JSON line o binario, consentendo:
+- recupero automatico dopo reset
+- replay di record non inviati
+- validazione locale dei dati acquisiti
+
+
+================================================================================
+3. CONCETTO GLOBALE
+================================================================================
+Il sistema Cicerone opera secondo una pipeline gerarchica:
+
+  ┌──────────────────────┐
+  │  L1. Campionamento   │ → acquisizione dati grezzi dai sensori
+  ├──────────────────────┤
+  │  L2. Elaborazione    │ → estrazione feature, BPM, RMS, stati ML
+  ├──────────────────────┤
+  │  L3. Aggregazione    │ → costruzione record JSON temporizzato
+  ├──────────────────────┤
+  │  L4. Trasmissione    │ → invio record via LoRa (uno per payload)
+  ├──────────────────────┤
+  │  L5. Storage         │ → salvataggio persistente su SD
+  └──────────────────────┘
+
+
+================================================================================
+4. FUTURE INTEGRATIONS
+================================================================================
+- Integrazione del modello ML per riconoscimento ruminazione (MAX9814)
+- Integrazione modello ML per comportamento (LIS3DH)
+- Compressione JSON leggera o CBOR per payload LoRa
+- Sincronizzazione bidirezionale con ACK via ChirpStack
+- Calibrazione automatica delle soglie fisiologiche e ambientali
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

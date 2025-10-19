@@ -1,0 +1,4 @@
+function decodeUplink(input) {
+  const text = String.fromCharCode.apply(null, input.bytes);
+  return { data: JSON.parse(text) };
+}
