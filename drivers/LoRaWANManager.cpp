@@ -25,9 +25,18 @@ bool LoRaWANManager::loadKeysFromSD() {
     }
 
     char line[96];
+
     while (cfg.available()) {
         int len = cfg.readBytesUntil('\n', line, sizeof(line) - 1);
         line[len] = '\0';
+
+        // Ignora linee vuote o commentate
+        if (line[0] == '#' || line[0] == '\0' || line[0] == '\r' || line[0] == '\n')
+            continue;
+
+        // Rimuovi eventuali \r finali (file DOS)
+        char* cr = strchr(line, '\r');
+        if (cr) *cr = '\0';
 
         if (strncmp(line, "devEUI=", 7) == 0)
             parseHex(line + 7, devEUI, 8);
@@ -38,7 +47,6 @@ bool LoRaWANManager::loadKeysFromSD() {
         else if (strncmp(line, "nwkKEY=", 7) == 0)
             parseHex(line + 7, nwkKEY, 16);
     }
-
     cfg.close();
     Serial.println("[LoRaWAN] Configurazione caricata correttamente.");
     printKeys();

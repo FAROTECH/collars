@@ -97,9 +97,11 @@
 #include <Adafruit_MLX90614.h>
 #include <TinyGPSPlus.h>
 
+
 // ======================================================================================
 // === VARIABILI GLOBALI ===
 // ======================================================================================
+
 telemetryRecord_t record;
 
 uint8_t ruminate_state  = 0;
@@ -109,22 +111,23 @@ uint8_t standing_state  = 0;
 uint8_t walking_state   = 0;
 float   vbat = 0.0f;
 
-TwoWire WireACC(PIN_LIS3DH_SDA, PIN_LIS3DH_SCL);
-Adafruit_LIS3DH lis = Adafruit_LIS3DH();
-Adafruit_BME280 bme;
-Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+// BME280  -> I2C2
+TwoWire WireBME280(PIN_BME280_SDA, PIN_BME280_SCL);
+// MLX90614 -> I2C3
+TwoWire WireMLX(PIN_MLX90614_SDA, PIN_MLX90614_SCL);
 
-// GPS
-HardwareSerial GPS(USART1);
+Adafruit_LIS3DH lis = Adafruit_LIS3DH(&Wire);     // Accelerometro su WireLIS3DH
+Adafruit_BME280 bme;                         // BME280 su WireBME280
+Adafruit_MLX90614 mlx = Adafruit_MLX90614(); // MLX90614 su WireMLX
+
+HardwareSerial& GPS = Serial1; 
 TinyGPSPlus gps;
 bool gps_fix = false;
 uint32_t last_gps_fix_time = 0;
 
-// Buffer LIS3DH per ML
 #define N_ACC_SAMPLES 300
 float x_axis[N_ACC_SAMPLES], y_axis[N_ACC_SAMPLES], z_axis[N_ACC_SAMPLES];
 
-// Timer
 uint32_t t_lastSensors = 0;
 uint32_t t_lastML      = 0;
 uint32_t t_lastAgg     = 0;
@@ -136,9 +139,15 @@ uint32_t t_lastGPS     = 0;
 // ======================================================================================
 void setup() 
 {
+  pinMode(LED_BUILTIN, OUTPUT);
+  
   Serial.begin(LOG_BAUDRATE);
-  delay(500);
+ 
   Serial.println("\n=== CICERONE Telemetry System ===");
+
+  Wire.begin();
+  WireBME280.begin();
+  WireMLX.begin();
 
   // --- GPS UART ---
   GPS.begin(GPS_BAUDRATE);
@@ -154,12 +163,12 @@ void setup()
   }
 
   // --- BME280 ---
-  if (!bme.begin(0x76)) {
+  if (!bme.begin(0x76, &WireBME280)) {
     Serial.println("[ERR] BME280 not found!");
   } else Serial.println("[OK] BME280 initialized");
 
   // --- MLX90614 ---
-  if (!mlx.begin()) {
+  if (!mlx.begin(0x5A, &WireMLX)) {
     Serial.println("[ERR] MLX90614 not found!");
   } else Serial.println("[OK] MLX90614 initialized");
 
@@ -194,7 +203,14 @@ void setup()
 // ======================================================================================
 // LOOP
 // ======================================================================================
+
 void loop() {
+
+  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+  delay(1000);                       // wait for a second
+  digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
+  delay(1000);   
+  
   uint32_t now = millis();
 
   // 1 Lettura sensori base ogni 60 s
