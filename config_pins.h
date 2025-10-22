@@ -7,9 +7,11 @@ Complete Hardware Pin Mapping
 |----------------|--------------|----------|---------------------------------------------|
 | LIS3DH         | SCL          | PB8      | I²C1 SCL – accelerometro                    |
 |                | SDA          | PB9      | I²C1 SDA – accelerometro                    |
+|                | Address      | 0x18     | sul ragno (0x19)											 |
 |----------------|--------------|----------|---------------------------------------------|
 | BME280         | SCL          | PA12     | I²C2 SCL – sensore temperatura/pressione    |
 |                | SDA          | PA15     | I²C2 SDA – sensore temperatura/pressione    |
+|                | Address      | 0x77     | 											 |
 |----------------|--------------|----------|---------------------------------------------|
 | MLX90614       | SCL          | PB13     | I²C3 SCL – termometro IR ambiente/oggetto   |
 |                | SDA          | PB14     | I²C3 SDA – termometro IR                    |

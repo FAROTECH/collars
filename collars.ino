@@ -5,6 +5,7 @@
  *  Platform:  Move-X Cicerone (STM32L4 + SX1262 + GPS)
  *  Version:   1.0.0
  *  Date:      2025-10-18
+ *  
  *  ----------------------------------------------------------------------------
  *  OVERVIEW:
  *  This firmware manages the acquisition, processing, aggregation, storage,
@@ -65,38 +66,19 @@
  *  © 2025 CShark S.r.l. – Embedded Systems Division
  *  All rights reserved.
  ******************************************************************************************/
-#include <Arduino.h>
 
-// === CONFIGURAZIONE BASE ===
 #include "config_pins.h"
 #include "config_sensors.h"
 #include "data_structs.h"
 
-// === DRIVER LAYER ===
-#include "drivers/json_serializer.h"
-#include "drivers/SDManager.h"
-#include "drivers/LoRaWANManager.h"
-#include "drivers/LoRaWANTransmitter.h"
+// === DRIVER & MODULE LAYER ===
 
-// === MODULE LAYER ===
-#include "modules/MotionModule.h"
-#include "modules/RuminationModule.h"
-
-// === IMPLEMENTAZIONI (.cpp) NECESSARIE PER IL LINKER ===
-#include "drivers/json_serializer.cpp"
-#include "drivers/SDManager.cpp"
-#include "drivers/LoRaWANManager.cpp"
-#include "drivers/LoRaWANTransmitter.cpp"
-#include "modules/MotionModule.cpp"
-#include "modules/RuminationModule.cpp"
-
-// === LIBRERIE ESTERNE ===
 #include <Wire.h>
 #include <Adafruit_LIS3DH.h>
 #include <Adafruit_BME280.h>
 #include <Adafruit_MLX90614.h>
 #include <TinyGPSPlus.h>
-
+#include <LibLoRaWAN.h>
 
 // ======================================================================================
 // === VARIABILI GLOBALI ===
@@ -113,41 +95,52 @@ float   vbat = 0.0f;
 
 // BME280  -> I2C2
 TwoWire WireBME280(PIN_BME280_SDA, PIN_BME280_SCL);
+Adafruit_BME280 bme;   // BME280 su WireBME280
+
 // MLX90614 -> I2C3
 TwoWire WireMLX(PIN_MLX90614_SDA, PIN_MLX90614_SCL);
+Adafruit_MLX90614 mlx; // MLX90614 su WireMLX
 
-Adafruit_LIS3DH lis = Adafruit_LIS3DH(&Wire);     // Accelerometro su WireLIS3DH
-Adafruit_BME280 bme;                         // BME280 su WireBME280
-Adafruit_MLX90614 mlx = Adafruit_MLX90614(); // MLX90614 su WireMLX
+// LIS3DH
+TwoWire WireLIS(PIN_LIS3DH_SDA, PIN_LIS3DH_SCL);
+Adafruit_LIS3DH lis(&WireLIS);   // Accelerometro su WireLIS3DH
 
-HardwareSerial& GPS = Serial1; 
+// GPS
+HardwareSerial GPS(Serial1);
 TinyGPSPlus gps;
+
 bool gps_fix = false;
 uint32_t last_gps_fix_time = 0;
 
+// LIS3DH buffer per ML
 #define N_ACC_SAMPLES 300
 float x_axis[N_ACC_SAMPLES], y_axis[N_ACC_SAMPLES], z_axis[N_ACC_SAMPLES];
 
+// Timer
 uint32_t t_lastSensors = 0;
 uint32_t t_lastML      = 0;
 uint32_t t_lastAgg     = 0;
 uint32_t t_lastTx      = 0;
 uint32_t t_lastGPS     = 0;
 
+// Lora Keys
+uint8_t devEUI[8]  = {0};
+uint8_t appEUI[8]  = {0};
+uint8_t appKEY[16] = {0};
+uint8_t nwkKEY[16] = {0};
+
 // ======================================================================================
 // SETUP
 // ======================================================================================
 void setup() 
 {
-  pinMode(LED_BUILTIN, OUTPUT);
-  
+  // Avvia la libreria
+  LoRaWAN.begin(false);   // false = no verbose debug
+    
   Serial.begin(LOG_BAUDRATE);
- 
+//  while(!Serial) {};
+  
   Serial.println("\n=== CICERONE Telemetry System ===");
-
-  Wire.begin();
-  WireBME280.begin();
-  WireMLX.begin();
 
   // --- GPS UART ---
   GPS.begin(GPS_BAUDRATE);
@@ -163,7 +156,7 @@ void setup()
   }
 
   // --- BME280 ---
-  if (!bme.begin(0x76, &WireBME280)) {
+  if (!bme.begin(0x77, &WireBME280)) {
     Serial.println("[ERR] BME280 not found!");
   } else Serial.println("[OK] BME280 initialized");
 
@@ -173,29 +166,29 @@ void setup()
   } else Serial.println("[OK] MLX90614 initialized");
 
   // --- SD Card ---
-  if (!SDManager::init()) {
-  	Serial.println("[WARN] SD non disponibile – dati non verranno salvati!");
+  if (!SDManager_init()) {
+    Serial.println("[WARN] SD non disponibile – dati non verranno salvati!");
   } else {
-  	Serial.println("[OK] SD pronta.");
+    Serial.println("[OK] SD pronta.");
   }
 
-  // --- LoRaWAN keys ---
-  if (!LoRaWANManager::loadKeysFromSD()) {
+  // --- LoRaWAN Keys ---
+  if (!LoRaWANManager_loadKeysFromSD()) {
     Serial.println("[WARN] LoRaWAN keys non caricate – trasmissione disabilitata!");
   } else {
     Serial.println("[OK] LoRaWAN keys pronte.");
   }
 
-  // --- LoRaWAN (LibLoRaWAN) ---
-  if (!LoRaWANTransmitter::init()) {
+  // --- LoRaWAN Transmitter ---
+  if (!LoRaWANTransmitter_init()) {
     Serial.println("[WARN] Join fallito – ritentare al prossimo ciclo.");
   } else {
     Serial.println("[OK] LoRaWAN join riuscito.");
   }
 
-  // --- ML modules ---
-  RuminationModule::init();
-  MotionModule::init();
+  // --- ML Modules ---
+  RuminationModule_init();
+  MotionModule_init();
 
   Serial.println("[System] Setup complete.\n");
 }
@@ -204,53 +197,41 @@ void setup()
 // LOOP
 // ======================================================================================
 
-void loop() {
-
-  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
-  delay(1000);                       // wait for a second
-  digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
-  delay(1000);   
-  
+void loop(){
   uint32_t now = millis();
 
-  // 1 Lettura sensori base ogni 60 s
   if (now - t_lastSensors >= 60000UL) {
     t_lastSensors = now;
     readAllSensors();
   }
 
-  // 2 Lettura GPS ogni 60 s
   if (now - t_lastGPS >= 60000UL) {
     t_lastGPS = now;
     readGPSData();
   }
 
-  // 3 Inferenze ML (stub) ogni 30 s
   if (now - t_lastML >= 30000UL) {
     t_lastML = now;
     performML();
   }
 
-  // 4 Aggregazione record ogni 5 min
   if (now - t_lastAgg >= 300000UL) {
     t_lastAgg = now;
     aggregateTelemetryRecord();
   }
 
-  // 5 Trasmissione simulata ogni 10 min
-  if (now - t_lastTx >= 600000UL) {   // 600 000 ms = 10 min
+  if (now - t_lastTx >= 600000UL) {
     t_lastTx = now;
+    Serial.println("FAKE Transmitting...Done");
+    delay(50);
     transmitTelemetry();
   }
 
-  // Lettura continua dei caratteri GPS per non perdere NMEA
   while (GPS.available() > 0) {
     gps.encode(GPS.read());
   }
 
-  // --- ECG Sampling Task ---
   Task_ECG();
-
   delay(50);
 }
 
@@ -273,8 +254,17 @@ void readAllSensors() {
   record.temp_ambient = temp_env;
   record.batt_voltage = vbat;
 
-  Serial.printf("[Sensors] Body=%.2f°C Env=%.2f°C Hum=%.1f%% Press=%.1f hPa Batt=%.2fV\n",
-                temp_body, temp_env, hum, press, vbat);
+  Serial.print("[Sensors] Body=");
+  Serial.print(temp_body, 2);
+  Serial.print("°C  Env=");
+  Serial.print(temp_env, 2);
+  Serial.print("°C  Hum=");
+  Serial.print(hum, 1);
+  Serial.print("%  Press=");
+  Serial.print(press, 1);
+  Serial.print(" hPa  Batt=");
+  Serial.print(vbat, 2);
+  Serial.println(" V");
 }
 
 void readGPSData() {
@@ -283,12 +273,16 @@ void readGPSData() {
     record.latitude  = gps.location.lat();
     record.longitude = gps.location.lng();
     last_gps_fix_time = millis();
-    Serial.printf("[GPS] Fix OK  Lat: %.6f  Lon: %.6f  Alt: %.1fm  Sats: %d  HDOP: %.2f\n",
-                  gps.location.lat(),
-                  gps.location.lng(),
-                  gps.altitude.meters(),
-                  gps.satellites.value(),
-                  gps.hdop.hdop());
+    Serial.print("[GPS] Fix OK  Lat: ");
+    Serial.print(gps.location.lat(), 6);
+    Serial.print("  Lon: ");
+    Serial.print(gps.location.lng(), 6);
+    Serial.print("  Alt: ");
+    Serial.print(gps.altitude.meters(), 1);
+    Serial.print(" m  Sats: ");
+    Serial.print(gps.satellites.value());
+    Serial.print("  HDOP: ");
+    Serial.println(gps.hdop.hdop(), 2);
   } else if (gps_fix && (millis() - last_gps_fix_time > 300000)) {
     gps_fix = false;
     Serial.println("[GPS] Lost fix");
@@ -307,12 +301,13 @@ void performML() {
   }
 
   // Stub: valori ML fittizi
-  ruminate_state = RuminationModule::run(NULL, 0);
-  MotionModule::run(x_axis, y_axis, z_axis, N_ACC_SAMPLES,
+  ruminate_state = RuminationModule_run(NULL, 0);
+  MotionModule_run(x_axis, y_axis, z_axis, N_ACC_SAMPLES,
                     grazing_state, sitting_state, standing_state, walking_state);
 }
 
-void aggregateTelemetryRecord() {
+void aggregateTelemetryRecord() 
+{
   record.timestamp = millis() / 1000;
   record.ruminate = ruminate_state;
   record.grazing  = grazing_state;
@@ -327,8 +322,8 @@ void aggregateTelemetryRecord() {
   Serial.println(json);
 
   // STORAGE su SD (L5)
-  if (SDManager::isReady()) {
-      SDManager::appendRecord(json);
+  if (SDManager_isReady()) {
+      SDManager_appendRecord(json);
   } else {
       Serial.println("[SD] Skip – SD non pronta.");
   }
@@ -338,22 +333,16 @@ void transmitTelemetry() {
     Serial.println("[LoRaTx] Invio record telemetrico...");
     const char* json = serializeTelemetryJSON(&record);
 
-    if (!LoRaWANTransmitter::isJoined()) {
+    if (!LoRaWANTransmitter_isJoined()) {
         Serial.println("[LoRaTx] Non joinato – skip invio.");
         return;
     }
 
-    if (!LoRaWANTransmitter::send(json)) {
+    if (!LoRaWANTransmitter_send(json)) {
         Serial.println("[LoRaTx] Invio fallito – salvo su SD.");
-        if (SDManager::isReady()) SDManager::appendRecord(json);
+        if (SDManager_isReady()) SDManager_appendRecord(json);
     }
 }
-
-/******************************************************************************************
- *  ECG Task – AD8232 (ECG → BPM)
- *  Campionamento a 100 Hz, finestra 5 s, rilevamento picchi, BPM medio.
- *  Output: record.heart_bpm
- ******************************************************************************************/
 
 #define ECG_SAMPLING_HZ    100
 #define ECG_WINDOW_MS      5000
@@ -383,9 +372,9 @@ void Task_ECG() {
   }
 }
 
-/**
- * Calcola BPM medio su finestra di 5 s e aggiorna record.heart_bpm
- */
+//
+// Calcola BPM medio su finestra di 5 s e aggiorna record.heart_bpm
+//
 void calculateBPM() {
   uint16_t peakCount = 0;
   bool above = false;
@@ -402,15 +391,14 @@ void calculateBPM() {
     }
   }
 
-  // BPM = (picchi in 5 s) * 12
   current_bpm = peakCount * (60.0f / (ECG_WINDOW_MS / 1000.0f));
-
-  // Filtraggio range fisiologico (pecora: 60–120 BPM)
   if (current_bpm < 40 || current_bpm > 180) current_bpm = NAN;
 
-  Serial.printf("[ECG] PeakCount=%u  BPM=%.1f\n", peakCount, current_bpm);
+  Serial.print("[ECG] PeakCount=");
+  Serial.print(peakCount);
+  Serial.print("  BPM=");
+  Serial.println(current_bpm, 1);
 
-  // Media mobile leggera
   static float last_bpm_values[5] = {0};
   static uint8_t ptr = 0;
   last_bpm_values[ptr++] = current_bpm;
@@ -424,5 +412,6 @@ void calculateBPM() {
 
   record.heart_bpm = avg;
 
-  Serial.printf("[ECG] BPM medio finestra = %.1f\n", record.heart_bpm);
+  Serial.print("[ECG] BPM medio finestra = ");
+  Serial.println(record.heart_bpm, 1);
 }
