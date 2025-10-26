@@ -31,6 +31,21 @@ typedef struct {
 } telemetryRecord_t;
 
 #endif
+
+/*
+Per il server (TTN/ChirpStack)
+
+Decodifica i campi come:
+
+lat = value / 1e6, lon = value / 1e6
+
+tb/ta = value / 100.0
+
+h = value / 10.0
+
+vb = value / 100.0
+*/
+
 /******************************************************************************************
  *  END OF FILE
  ******************************************************************************************/
