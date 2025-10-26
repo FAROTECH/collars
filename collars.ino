@@ -12,8 +12,8 @@
 #include <SPI.h>
 #include <SdFat.h>
 #include <LibLoRaWAN.h>
-#include <TinyGPSPlus.h>
-#include <Adafruit_Sensor.h>
+#include "nmea_slim.h"
+//#include <Adafruit_Sensor.h>
 #include <Adafruit_LIS3DH.h>
 #include <Adafruit_BME280.h>
 #include <Adafruit_MLX90614.h>
@@ -34,7 +34,6 @@ static void updateAccelFeaturesFromSample_mg(int16_t ax_mg, int16_t ay_mg, int16
 
 // Variabili BME che usi nel packer
 static float bme_pressure_hpa = 0.0f;
-static float bme_altitude_m   = 0.0f;
 
 // Fallback per RAD_TO_DEG se non definito (di solito c'è già via Arduino.h)
 #ifndef RAD_TO_DEG
@@ -105,7 +104,10 @@ uint8_t nwkKEY[16] = {0};
 
 // GPS
 HardwareSerial& GPS = Serial1;  // USART1: PA9/PA10
-TinyGPSPlus gps;
+NMEASlim nmea;
+// Quota GPS (in metri) come float usata dal packer
+static float gps_altitude_m = NAN;
+
 
 // Telemetry buffer
 static telemetryRecord_t telem;
@@ -164,7 +166,8 @@ static void printKey(const char* label, const uint8_t* key, int len) {
 static uint8_t make_status() {
   uint8_t s = 0;
 #if ENABLE_GPS
-  if (gps.location.isValid()) s |= 1<<0; // GPS fix
+  const NMEAData& gd = nmea.data();
+  if (gd.fix_valid || gd.gga_valid) s |= 1<<0;  // GPS fix
 #endif
 #if ENABLE_BME280
   s |= 1<<1;
@@ -203,9 +206,15 @@ static size_t buildTelemetryBinary(uint8_t* out) {
   uint32_t t     = telem.timestamp;
   int      bpm   = (int)lrintf(telem.heart_bpm);
 
-  // NEW: pressione e altitudine (scalate)
+  // pressione e altitudine (scalate)
   uint16_t press_dh = (uint16_t)constrain((int)lrintf(bme_pressure_hpa * 10.0f), 0, 65535);
-  int16_t  alt_m    = (int16_t)constrain((int)lrintf(bme_altitude_m), -32768, 32767);
+  
+  int16_t alt_m = INT16_MIN;
+  if (isfinite(gps_altitude_m)) {
+    long m = lrintf(gps_altitude_m);  // arrotonda al metro
+    if (m < -32768) m = -32768; else if (m > 32767) m = 32767;
+    alt_m = (int16_t)m;
+  }
 
   uint8_t flags = (telem.ruminate ? 1:0)
                 | (telem.grazing  ? 2:0)
@@ -397,8 +406,7 @@ static void readAllSensors()
   telem.humidity     = bme.readHumidity();
   float p_pa = bme.readPressure();
   if (isfinite(p_pa)) bme_pressure_hpa = p_pa / 100.0f;
-  float alt = bme.readAltitude(BME_SEA_LEVEL_HPA);
-  if (isfinite(alt)) bme_altitude_m = alt;
+  // altitude removed: use GPS altitude via NMEA
 #endif
 
 #if ENABLE_MLX90614
@@ -500,10 +508,19 @@ static void updateAccelFeaturesFromSample_mg(int16_t ax_mg, int16_t ay_mg, int16
 // === GPS ==============================================================================
 static void readGPSData() {
 #if ENABLE_GPS
-  // Nothing blocking here; background decode is in the main loop while-available
-  if (gps.location.isValid()) {
-    telem.latitude  = gps.location.lat();
-    telem.longitude = gps.location.lng();
+  const NMEAData& gd = nmea.data();
+
+  // Lat/Lon se c'è fix (RMC 'A') o GGA con fix>0
+  if (gd.fix_valid || gd.gga_valid) {
+    telem.latitude  = gd.lat_e6 / 1000000.0;
+    telem.longitude = gd.lon_e6 / 1000000.0;
+  }
+
+  // Altitudine: GGA -> decimetri → metri (float) per compatibilità col packer
+  if (gd.alt_dm != INT32_MIN) {
+    gps_altitude_m = (float)gd.alt_dm / 10.0f;
+  } else {
+    gps_altitude_m = NAN;  // sentinel: nel packer diventa INT16_MIN
   }
 #endif
 }
@@ -686,6 +703,7 @@ void setup() {
   // GPS
 #if ENABLE_GPS
   GPS.begin(GPS_BAUDRATE);
+  nmea.begin(&GPS);
 #endif
 
   // Sensors
@@ -709,6 +727,10 @@ void setup() {
 void loop() {
   // Must be called frequently for radio timing/state machine
   LoRaWAN.process();
+
+#if ENABLE_GPS
+  nmea.poll();
+#endif
 
   uint32_t now = millis();
 
@@ -740,9 +762,7 @@ void loop() {
 
   // Background GPS NMEA parse
 #if ENABLE_GPS
-  while (GPS.available() > 0) {
-    gps.encode(GPS.read());
-  }
+  nmea.poll();
 #endif
 
   // Background ECG processing
@@ -753,4 +773,8 @@ void loop() {
 
   // Also call process() again after potential delays to keep MAC timing tight
   LoRaWAN.process();
+
+#if ENABLE_GPS
+  nmea.poll();
+#endif
 }
